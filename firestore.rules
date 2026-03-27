@@ -1,0 +1,174 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // =================================================================
+    // Assumed Data Model
+    // =================================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    //   - settings: map (optional)
+    //
+    // Collection: users/{userId}/sessions
+    // Document ID: {sessionId}
+    // Fields:
+    //   - id: string (required)
+    //   - userId: string (required)
+    //   - date: string (required)
+    //   - wpm: number (required)
+    //   - accuracy: number (required)
+    //   - settings: map (optional)
+    //
+    // Collection: users/{userId}/records
+    // Document ID: {recordId}
+    // Fields:
+    //   - id: string (required)
+    //   - userId: string (required)
+    //   - title: string (required)
+    //   - wpm: number (required)
+    //   - accuracy: number (required)
+    //   - date: string (required)
+    //
+    // =================================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+        ('name' in request.auth.token && request.auth.token.name.matches('.*\\.admin$') && 'email' in request.auth.token && request.auth.token.email.matches('.*@typetrack\\.local$')) ||
+        ('email' in request.auth.token && (
+          request.auth.token.email == "rajarin@typetrack.local" ||
+          request.auth.token.email == "pratyus@typetrack.local" ||
+          request.auth.token.email == "pratyusalt@typetrack.local"
+        ))
+      );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || 
+             (request.resource.data.uid == resource.data.uid);
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidUser(data) {
+      return data.uid is string && data.uid.size() > 0 && data.uid.size() < 100 &&
+             data.email is string && data.email.size() >= 0 && data.email.size() < 200 &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 200)) &&
+             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() < 2000)) &&
+             (!('role' in data) || (data.role is string && data.role.size() < 50)) &&
+             (!('disabled' in data) || data.disabled is bool) &&
+             (!('deleted' in data) || data.deleted is bool);
+    }
+
+    function isValidSession(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() < 100 &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() < 100 &&
+             data.date is string && data.date.size() > 0 && data.date.size() < 50 &&
+             data.wpm is number && data.wpm >= 0 &&
+             data.accuracy is number && data.accuracy >= 0 && data.accuracy <= 100;
+    }
+
+    function isValidRecord(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() < 100 &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() < 100 &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 100 &&
+             data.date is string && data.date.size() > 0 && data.date.size() < 50 &&
+             data.wpm is number && data.wpm >= 0 &&
+             data.accuracy is number && data.accuracy >= 0 && data.accuracy <= 100;
+    }
+
+    function isValidMail(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() < 100 &&
+             data.senderUid is string && data.senderUid.size() > 0 && data.senderUid.size() < 100 &&
+             data.senderEmail is string && data.senderEmail.size() > 0 && data.senderEmail.size() < 200 &&
+             data.recipientEmail is string && data.recipientEmail.size() > 0 && data.recipientEmail.size() < 200 &&
+             data.message is string && data.message.size() > 0 && data.message.size() < 5000 &&
+             data.timestamp is number && data.timestamp > 0 &&
+             data.read is bool;
+    }
+
+    function isValidNote(data) {
+      return data.id is string && data.id.size() > 0 && data.id.size() < 100 &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() < 100 &&
+             data.title is string && data.title.size() >= 0 && data.title.size() < 200 &&
+             data.content is string && data.content.size() >= 0 && data.content.size() < 100000 &&
+             data.pinned is bool &&
+             data.updatedAt is number && data.updatedAt > 0 &&
+             data.createdAt is number && data.createdAt > 0;
+    }
+
+    match /mail/{mailId} {
+      allow read: if isAuthenticated() && (
+        resource.data.senderUid == request.auth.uid || 
+        ('email' in request.auth.token && resource.data.recipientEmail == request.auth.token.email)
+      );
+      allow create: if isAuthenticated() && 
+                    hasRequiredFields(['id', 'senderUid', 'senderEmail', 'recipientEmail', 'message', 'timestamp', 'read']) && 
+                    isValidMail(request.resource.data) && 
+                    request.resource.data.senderUid == request.auth.uid && 
+                    ('email' in request.auth.token && request.resource.data.senderEmail == request.auth.token.email);
+      allow update: if isAuthenticated() && 
+                    ('email' in request.auth.token && resource.data.recipientEmail == request.auth.token.email) && 
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(["read"]) &&
+                    request.resource.data.read is bool;
+      allow delete: if isAuthenticated() && (
+        resource.data.senderUid == request.auth.uid || 
+        ('email' in request.auth.token && resource.data.recipientEmail == request.auth.token.email)
+      );
+    }
+
+    match /system/{document=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && hasRequiredFields(['uid', 'email']) && isValidUser(request.resource.data) && uidUnchanged();
+      allow update: if (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data) && uidNotModified();
+      allow delete: if isOwner(userId);
+
+      match /sessions/{sessionId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && hasRequiredFields(['id', 'userId', 'date', 'wpm', 'accuracy']) && isValidSession(request.resource.data) && request.resource.data.userId == request.auth.uid;
+        allow update: if isOwner(userId) && isValidSession(request.resource.data) && request.resource.data.userId == resource.data.userId;
+        allow delete: if isOwner(userId);
+      }
+
+      match /records/{recordId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && hasRequiredFields(['id', 'userId', 'title', 'date', 'wpm', 'accuracy']) && isValidRecord(request.resource.data) && request.resource.data.userId == request.auth.uid;
+        allow update: if isOwner(userId) && isValidRecord(request.resource.data) && request.resource.data.userId == resource.data.userId;
+        allow delete: if isOwner(userId);
+      }
+
+      match /notes/{notfId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && hasRequiredFields(['id', 'userId', 'title', 'content', 'pinned', 'updatedAt', 'createdAt']) && isValidNote(request.resource.data) && request.resource.data.userId == request.auth.uid;
+        allow update: if isOwner(userId) && isValidNote(request.resource.data) && request.resource.data.userId == resource.data.userId && request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}
